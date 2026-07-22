@@ -1,0 +1,89 @@
+{
+  "name": "review-escalation-flow",
+  "description": "Catalyst Circuits workflow for Flag Lifecycle (Acknowledge, Escalate, Dismiss)",
+  "start_state": "EvaluateDecisionBranch",
+  "states": {
+    "EvaluateDecisionBranch": {
+      "type": "Choice",
+      "choices": [
+        {
+          "variable": "$.decision",
+          "string_equals": "ACKNOWLEDGE",
+          "next_state": "AcknowledgeBranch"
+        },
+        {
+          "variable": "$.decision",
+          "string_equals": "ESCALATE",
+          "next_state": "EscalateBranch"
+        },
+        {
+          "variable": "$.decision",
+          "string_equals": "DISMISS",
+          "next_state": "DismissBranch"
+        }
+      ],
+      "default_state": "InvalidDecision"
+    },
+    "AcknowledgeBranch": {
+      "type": "Task",
+      "resource": "functions/review-decision",
+      "parameters": {
+        "action": "ASSIGN_GROUND_PATROL",
+        "flag_id": "$.flag_id",
+        "assigned_to": "$.assigned_to",
+        "action_type": "$.action_type"
+      },
+      "next_state": "CloseFlagSuccess"
+    },
+    "EscalateBranch": {
+      "type": "Task",
+      "resource": "functions/review-decision",
+      "parameters": {
+        "action": "SEND_MAIL_PUSH_NOTIF",
+        "target_role": "DISTRICT_SP",
+        "flag_id": "$.flag_id",
+        "reason": "$.reason"
+      },
+      "next_state": "OpenSeniorReview"
+    },
+    "DismissBranch": {
+      "type": "Task",
+      "resource": "functions/review-decision",
+      "parameters": {
+        "action": "LOG_AUDIT_FEEDBACK",
+        "flag_id": "$.flag_id",
+        "rejection_reason": "$.reason"
+      },
+      "next_state": "CloseFlagDismissed"
+    },
+    "CloseFlagSuccess": {
+      "type": "Pass",
+      "result": {
+        "status": "CLOSED_ACKNOWLEDGED",
+        "message": "Flag acknowledged and ground deployment dispatched successfully."
+      },
+      "end": true
+    },
+    "OpenSeniorReview": {
+      "type": "Pass",
+      "result": {
+        "status": "ESCALATED_PENDING_SP_REVIEW",
+        "message": "Escalated to District SP. Catalyst Mail & Push alert sent."
+      },
+      "end": true
+    },
+    "CloseFlagDismissed": {
+      "type": "Pass",
+      "result": {
+        "status": "CLOSED_DISMISSED",
+        "message": "Flag dismissed with reason recorded in model feedback audit log."
+      },
+      "end": true
+    },
+    "InvalidDecision": {
+      "type": "Fail",
+      "error": "InvalidDecisionError",
+      "cause": "Provided decision is not one of: ACKNOWLEDGE, ESCALATE, DISMISS"
+    }
+  }
+}

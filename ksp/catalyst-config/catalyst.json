@@ -1,0 +1,71 @@
+{
+  "name": "ksp_crime_intel_platform",
+  "project_id": "ksp_crime_intel_prod_01",
+  "client": {
+    "source": "client",
+    "build_command": "npm run build",
+    "output_directory": "dist"
+  },
+  "functions": [
+    {
+      "name": "intake-incident",
+      "type": "basic",
+      "path": "functions/intake-incident",
+      "handler": "index.handler"
+    },
+    {
+      "name": "role-view",
+      "type": "basic",
+      "path": "functions/role-view",
+      "handler": "index.handler"
+    },
+    {
+      "name": "flags",
+      "type": "basic",
+      "path": "functions/flags",
+      "handler": "index.handler"
+    },
+    {
+      "name": "review-decision",
+      "type": "basic",
+      "path": "functions/review-decision",
+      "handler": "index.handler"
+    },
+    {
+      "name": "dgp-summary",
+      "type": "basic",
+      "path": "functions/dgp-summary",
+      "handler": "index.handler"
+    }
+  ],
+  "event_functions": [
+    {
+      "name": "crosslink-on-insert",
+      "type": "event",
+      "path": "event-functions/crosslink-on-insert",
+      "target_event": "DataStore.incidents.onInsert",
+      "handler": "index.handler"
+    },
+    {
+      "name": "flag-detector",
+      "type": "event",
+      "path": "event-functions/flag-detector",
+      "target_event": "DataStore.crosslink_complete",
+      "handler": "index.handler"
+    }
+  ],
+  "cron_jobs": [
+    {
+      "name": "nightly-batch-scoring",
+      "path": "cron-jobs/nightly-batch-scoring",
+      "cron_expression": "0 2 * * *",
+      "timezone": "Asia/Kolkata"
+    }
+  ],
+  "circuits": [
+    {
+      "name": "review-escalation-flow",
+      "definition": "circuits/review-escalation-flow.json"
+    }
+  ]
+}
