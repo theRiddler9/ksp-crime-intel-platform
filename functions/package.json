@@ -1,0 +1,12 @@
+{
+  "name": "ksp-crime-intel-functions",
+  "version": "1.0.0",
+  "description": "Catalyst Serverless Functions — data layer + intake for KSP Crime Intel Platform",
+  "main": "index.js",
+  "dependencies": {
+    "zcatalyst-sdk-node": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
