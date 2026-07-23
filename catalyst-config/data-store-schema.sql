@@ -1,281 +1,234 @@
--- =============================================================================
--- Karnataka State Police (KSP) FIR System Database Schema
--- Official Entity Relationship Diagram (ERD) & Operational Data Store Schema
--- =============================================================================
+-- ============================================================================
+-- KSP Crime Intel Platform — Data Store Schema (Relational)
+-- Target: Zoho Catalyst Data Store
+-- ============================================================================
+-- Ordering matters: tables are created in dependency order (referenced
+-- tables before referencing tables) so this file can be run top-to-bottom
+-- on a fresh Data Store with foreign keys enabled.
+-- ============================================================================
 
--- -----------------------------------------------------------------------------
--- Master Lookup Tables
--- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS State (
-    StateID INT PRIMARY KEY AUTO_INCREMENT,
-    StateName VARCHAR(128) NOT NULL,
-    NationalityID INT DEFAULT 1,
-    Active BIT DEFAULT 1
+-- ----------------------------------------------------------------------------
+-- 1. REFERENCE / LOOKUP DATA
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE districts (
+    district_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            VARCHAR(100)    NOT NULL,
+    station_code    VARCHAR(20)     NOT NULL UNIQUE,
+    state           VARCHAR(50)     DEFAULT 'Kerala',
+    created_at      DATETIME        DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS District (
-    DistrictID INT PRIMARY KEY AUTO_INCREMENT,
-    DistrictName VARCHAR(128) NOT NULL,
-    StateID INT NOT NULL,
-    Active BIT DEFAULT 1,
-    FOREIGN KEY (StateID) REFERENCES State(StateID)
+CREATE TABLE locations (
+    location_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    district_id     INTEGER         NOT NULL,
+    latitude        DECIMAL(9,6)    NOT NULL,
+    longitude       DECIMAL(9,6)    NOT NULL,
+    address_text    VARCHAR(255),
+    location_type   VARCHAR(30),        -- e.g. residential, commercial, public_space, transit
+    created_at      DATETIME        DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (district_id) REFERENCES districts(district_id)
 );
 
-CREATE TABLE IF NOT EXISTS UnitType (
-    UnitTypeID INT PRIMARY KEY AUTO_INCREMENT,
-    UnitTypeName VARCHAR(128) NOT NULL, -- e.g., Police Station, Circle Office, District Office
-    CityDistState VARCHAR(64)
+-- Index: crime-map and risk-forecast both filter/aggregate by district first,
+-- then narrow to a bounding box — this index supports that access pattern.
+CREATE INDEX idx_locations_district ON locations(district_id);
+
+
+-- ----------------------------------------------------------------------------
+-- 2. USERS / ROLES
+-- ----------------------------------------------------------------------------
+-- Catalyst Authentication issues the session/identity; this table maps that
+-- identity to a role + jurisdiction so role-view and API Gateway can do
+-- server-side authorization (never trust the client's role claim alone).
+
+CREATE TABLE users (
+    user_id         VARCHAR(50)     PRIMARY KEY,   -- Catalyst Auth user ID (ZUID)
+    full_name       VARCHAR(100)    NOT NULL,
+    role            VARCHAR(20)     NOT NULL,       -- constable | sho | sp | analyst | dgp
+    district_id     INTEGER,                        -- jurisdiction scope (NULL for dgp = statewide)
+    badge_number     VARCHAR(30)    UNIQUE,
+    is_active       BOOLEAN         DEFAULT 1,
+    created_at      DATETIME        DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (district_id) REFERENCES districts(district_id),
+    CHECK (role IN ('constable', 'sho', 'sp', 'analyst', 'dgp'))
 );
 
-CREATE TABLE IF NOT EXISTS Unit (
-    UnitID INT PRIMARY KEY AUTO_INCREMENT, -- PoliceStationID
-    UnitName VARCHAR(128) NOT NULL,
-    TypeID INT NOT NULL,
-    ParentUnit INT,
-    NationalityID INT DEFAULT 1,
-    StateID INT NOT NULL,
-    DistrictID INT NOT NULL,
-    Active BIT DEFAULT 1,
-    FOREIGN KEY (TypeID) REFERENCES UnitType(UnitTypeID),
-    FOREIGN KEY (StateID) REFERENCES State(StateID),
-    FOREIGN KEY (DistrictID) REFERENCES District(DistrictID)
+CREATE INDEX idx_users_role ON users(role);
+
+
+-- ----------------------------------------------------------------------------
+-- 3. CORE ENTITIES: PEOPLE
+-- ----------------------------------------------------------------------------
+-- Offenders/victims are deduplicated, reusable entities — NOT embedded fields
+-- on incidents — because the same person can appear across multiple cases,
+-- and that reuse is exactly what network-analysis and MO-matching depend on.
+
+CREATE TABLE offenders (
+    offender_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            VARCHAR(100)    NOT NULL,
+    aliases         TEXT,               -- comma-separated or JSON array as text
+    date_of_birth   DATE,
+    id_number       VARCHAR(50),        -- Aadhaar/other ID if available, keep nullable
+    known_address   VARCHAR(255),
+    risk_notes      TEXT,               -- free text, analyst-maintained
+    created_at      DATETIME        DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME        DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS Rank (
-    RankID INT PRIMARY KEY AUTO_INCREMENT,
-    RankName VARCHAR(128) NOT NULL, -- Constable, Head Constable, Inspector, DSP, SP
-    Hierarchy INT NOT NULL,
-    Active BIT DEFAULT 1
+CREATE INDEX idx_offenders_name ON offenders(name);
+
+CREATE TABLE victims (
+    victim_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            VARCHAR(100)    NOT NULL,
+    contact_phone   VARCHAR(20),
+    contact_address VARCHAR(255),
+    created_at      DATETIME        DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS Designation (
-    DesignationID INT PRIMARY KEY AUTO_INCREMENT,
-    DesignationName VARCHAR(128) NOT NULL, -- Investigating Officer, SHO, SP, Analyst, DGP
-    Active BIT DEFAULT 1,
-    SortOrder INT DEFAULT 1
+
+-- ----------------------------------------------------------------------------
+-- 4. INCIDENTS — the system of record, single writer: intake-incident
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE incidents (
+    incident_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    fir_number      VARCHAR(50)     UNIQUE,
+    incident_type   VARCHAR(50)     NOT NULL,   -- theft | assault | burglary | robbery | homicide | ...
+    location_id     INTEGER         NOT NULL,
+    reported_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    occurred_at     DATETIME        NOT NULL,
+    narrative_text  TEXT,                        -- raw FIR narrative — feeds QuickML/RAG, keep unabridged
+    modus_operandi  VARCHAR(255),                -- short structured MO tag(s), feeds mo_similarity_matcher
+    status          VARCHAR(20)     NOT NULL DEFAULT 'open',  -- open | under_review | closed
+    severity        VARCHAR(20),                 -- low | medium | high | critical (initial triage, human or rule-based)
+    created_by      VARCHAR(50)     NOT NULL,    -- FK to users.user_id (constable who filed it)
+    created_at      DATETIME        DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME        DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (location_id) REFERENCES locations(location_id),
+    FOREIGN KEY (created_by) REFERENCES users(user_id),
+    CHECK (status IN ('open', 'under_review', 'closed'))
 );
 
-CREATE TABLE IF NOT EXISTS Employee (
-    EmployeeID INT PRIMARY KEY AUTO_INCREMENT,
-    DistrictID INT NOT NULL,
-    UnitID INT NOT NULL,
-    RankID INT NOT NULL,
-    DesignationID INT NOT NULL,
-    KGID VARCHAR(32) UNIQUE NOT NULL, -- Karnataka Government ID
-    FirstName VARCHAR(128) NOT NULL,
-    EmployeeDOB DATE,
-    GenderID INT,
-    BloodGroupID INT,
-    PhysicallyChallenged BIT DEFAULT 0,
-    AppointmentDate DATE,
-    FOREIGN KEY (DistrictID) REFERENCES District(DistrictID),
-    FOREIGN KEY (UnitID) REFERENCES Unit(UnitID),
-    FOREIGN KEY (RankID) REFERENCES Rank(RankID),
-    FOREIGN KEY (DesignationID) REFERENCES Designation(DesignationID)
+-- The two hottest read paths in the whole system: map queries filtered by
+-- time window, and the pending-flags queue (see flags table below).
+CREATE INDEX idx_incidents_location_time ON incidents(location_id, occurred_at);
+CREATE INDEX idx_incidents_type ON incidents(incident_type);
+CREATE INDEX idx_incidents_status ON incidents(status);
+
+
+-- ----------------------------------------------------------------------------
+-- 5. JUNCTIONS — many-to-many incident <-> people
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE incident_offenders (
+    incident_id         INTEGER     NOT NULL,
+    offender_id         INTEGER     NOT NULL,
+    role_in_incident    VARCHAR(30) DEFAULT 'suspect',  -- suspect | accused | convicted
+    added_at            DATETIME    DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (incident_id, offender_id),
+    FOREIGN KEY (incident_id) REFERENCES incidents(incident_id),
+    FOREIGN KEY (offender_id) REFERENCES offenders(offender_id)
 );
 
-CREATE TABLE IF NOT EXISTS CaseCategory (
-    CaseCategoryID INT PRIMARY KEY AUTO_INCREMENT,
-    LookupValue VARCHAR(64) NOT NULL -- FIR (1), UDR (3), Zero FIR (8), PAR (4)
+CREATE TABLE incident_victims (
+    incident_id     INTEGER     NOT NULL,
+    victim_id       INTEGER     NOT NULL,
+    added_at        DATETIME    DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (incident_id, victim_id),
+    FOREIGN KEY (incident_id) REFERENCES incidents(incident_id),
+    FOREIGN KEY (victim_id) REFERENCES victims(victim_id)
 );
 
-CREATE TABLE IF NOT EXISTS GravityOffence (
-    GravityOffenceID INT PRIMARY KEY AUTO_INCREMENT,
-    LookupValue VARCHAR(64) NOT NULL -- Heinous, Non-Heinous
+-- These indexes support crosslink-on-insert's read pattern: "give me all
+-- people tied to this incident" right after intake writes it.
+CREATE INDEX idx_incident_offenders_offender ON incident_offenders(offender_id);
+CREATE INDEX idx_incident_victims_victim ON incident_victims(victim_id);
+
+
+-- ----------------------------------------------------------------------------
+-- 6. FLAGS — machine-generated, written by flag-detector
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE flags (
+    flag_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id     INTEGER         NOT NULL,
+    flag_type       VARCHAR(30)     NOT NULL,   -- hotspot | mo_match | anomaly | risk_score
+    score           DECIMAL(5,4),                -- 0.0000–1.0000 confidence/risk value
+    details         TEXT,                        -- JSON-as-text: model output, matched incident ids, etc.
+    generated_by    VARCHAR(40)     NOT NULL,    -- e.g. 'hotspot_clustering_v1', 'zia_automl'
+    status          VARCHAR(20)     NOT NULL DEFAULT 'pending',  -- pending | acknowledged | escalated | dismissed
+    assigned_district_id INTEGER,                -- denormalized for fast queue filtering by jurisdiction
+    created_at      DATETIME        DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME        DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (incident_id) REFERENCES incidents(incident_id),
+    FOREIGN KEY (assigned_district_id) REFERENCES districts(district_id),
+    CHECK (status IN ('pending', 'acknowledged', 'escalated', 'dismissed')),
+    CHECK (flag_type IN ('hotspot', 'mo_match', 'anomaly', 'risk_score'))
 );
 
-CREATE TABLE IF NOT EXISTS CrimeHead (
-    CrimeHeadID INT PRIMARY KEY AUTO_INCREMENT,
-    CrimeGroupName VARCHAR(128) NOT NULL, -- e.g. Crimes Against Body, Property Offence, Cybercrime
-    Active BIT DEFAULT 1
+-- Primary queue query for alert-review: WHERE status = 'pending' ORDER BY created_at
+CREATE INDEX idx_flags_status_created ON flags(status, created_at);
+CREATE INDEX idx_flags_incident ON flags(incident_id);
+CREATE INDEX idx_flags_district ON flags(assigned_district_id, status);
+
+
+-- ----------------------------------------------------------------------------
+-- 7. REVIEW DECISIONS — immutable audit trail, written by review-decision
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE review_decisions (
+    decision_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    flag_id         INTEGER         NOT NULL,
+    decided_by      VARCHAR(50)     NOT NULL,    -- FK to users.user_id
+    decision        VARCHAR(20)     NOT NULL,    -- acknowledge | escalate | dismiss
+    reason          TEXT,
+    decided_at      DATETIME        DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (flag_id) REFERENCES flags(flag_id),
+    FOREIGN KEY (decided_by) REFERENCES users(user_id),
+    CHECK (decision IN ('acknowledge', 'escalate', 'dismiss'))
 );
 
-CREATE TABLE IF NOT EXISTS CrimeSubHead (
-    CrimeSubHeadID INT PRIMARY KEY AUTO_INCREMENT,
-    CrimeHeadID INT NOT NULL,
-    CrimeHeadName VARCHAR(128) NOT NULL, -- e.g. Murder, Theft, Burglary, Chain Snatching
-    SeqID INT DEFAULT 1,
-    FOREIGN KEY (CrimeHeadID) REFERENCES CrimeHead(CrimeHeadID)
+CREATE INDEX idx_review_decisions_flag ON review_decisions(flag_id);
+CREATE INDEX idx_review_decisions_decided_at ON review_decisions(decided_at);
+
+
+-- ----------------------------------------------------------------------------
+-- 8. ACTION OUTCOMES — what happened after a decision, for audit + ML feedback
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE action_outcomes (
+    outcome_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id     INTEGER         NOT NULL,
+    outcome_type    VARCHAR(30),        -- e.g. 'arrest_made', 'no_further_action', 'false_positive_confirmed'
+    notes           TEXT,
+    recorded_by     VARCHAR(50),
+    recorded_at     DATETIME        DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (decision_id) REFERENCES review_decisions(decision_id),
+    FOREIGN KEY (recorded_by) REFERENCES users(user_id)
 );
 
-CREATE TABLE IF NOT EXISTS CaseStatusMaster (
-    CaseStatusID INT PRIMARY KEY AUTO_INCREMENT,
-    CaseStatusName VARCHAR(128) NOT NULL -- Under Investigation, Charge Sheeted, Closed, Undetected
-);
+CREATE INDEX idx_action_outcomes_decision ON action_outcomes(decision_id);
 
-CREATE TABLE IF NOT EXISTS Court (
-    CourtID INT PRIMARY KEY AUTO_INCREMENT,
-    CourtName VARCHAR(256) NOT NULL,
-    DistrictID INT NOT NULL,
-    StateID INT NOT NULL,
-    Active BIT DEFAULT 1,
-    FOREIGN KEY (DistrictID) REFERENCES District(DistrictID),
-    FOREIGN KEY (StateID) REFERENCES State(StateID)
-);
 
-CREATE TABLE IF NOT EXISTS Act (
-    ActCode VARCHAR(64) PRIMARY KEY, -- IPC, NDPS, IT_ACT, BNS
-    ActDescription VARCHAR(256) NOT NULL,
-    ShortName VARCHAR(64) NOT NULL,
-    Active BIT DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS Section (
-    ActCode VARCHAR(64) NOT NULL,
-    SectionCode VARCHAR(64) NOT NULL, -- e.g. 302, 379, 420, 303
-    SectionDescription VARCHAR(256) NOT NULL,
-    Active BIT DEFAULT 1,
-    PRIMARY KEY (ActCode, SectionCode),
-    FOREIGN KEY (ActCode) REFERENCES Act(ActCode)
-);
-
--- -----------------------------------------------------------------------------
--- Core Case Management Tables (Karnataka Police ERD Specification)
--- -----------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS CaseMaster (
-    CaseMasterID INT PRIMARY KEY AUTO_INCREMENT,
-    CrimeNo VARCHAR(64) UNIQUE NOT NULL, -- Format: 1 digit Category (1) + 4 digit Dist + 4 digit Unit + 4 digit Year + 5 digit Serial (e.g. 104430006202600001)
-    CaseNo VARCHAR(32) NOT NULL, -- Format: YYYY + 5-digit Serial (e.g. 202600001 - Last 9 digits of CrimeNo)
-    CrimeRegisteredDate DATE NOT NULL,
-    PolicePersonID INT NOT NULL, -- Employee.EmployeeID (Officer who registered FIR)
-    PoliceStationID INT NOT NULL, -- Unit.UnitID (Police Station)
-    CaseCategoryID INT NOT NULL, -- CaseCategory.CaseCategoryID
-    GravityOffenceID INT NOT NULL, -- GravityOffence.GravityOffenceID
-    CrimeMajorHeadID INT NOT NULL, -- CrimeHead.CrimeHeadID
-    CrimeMinorHeadID INT NOT NULL, -- CrimeSubHead.CrimeSubHeadID
-    CaseStatusID INT NOT NULL, -- CaseStatusMaster.CaseStatusID
-    CourtID INT,
-    IncidentFromDate DATETIME NOT NULL,
-    IncidentToDate DATETIME,
-    InfoReceivedPSDate DATETIME NOT NULL,
-    latitude DECIMAL(10, 8) NOT NULL,
-    longitude DECIMAL(11, 8) NOT NULL,
-    BriefFacts TEXT NOT NULL,
-    mo_tags JSON, -- Standardized Modus Operandi tags
-    FOREIGN KEY (PolicePersonID) REFERENCES Employee(EmployeeID),
-    FOREIGN KEY (PoliceStationID) REFERENCES Unit(UnitID),
-    FOREIGN KEY (CaseCategoryID) REFERENCES CaseCategory(CaseCategoryID),
-    FOREIGN KEY (GravityOffenceID) REFERENCES GravityOffence(GravityOffenceID),
-    FOREIGN KEY (CrimeMajorHeadID) REFERENCES CrimeHead(CrimeHeadID),
-    FOREIGN KEY (CrimeMinorHeadID) REFERENCES CrimeSubHead(CrimeSubHeadID),
-    FOREIGN KEY (CaseStatusID) REFERENCES CaseStatusMaster(CaseStatusID),
-    FOREIGN KEY (CourtID) REFERENCES Court(CourtID)
-);
-
-CREATE TABLE IF NOT EXISTS ComplainantDetails (
-    ComplainantID INT PRIMARY KEY AUTO_INCREMENT,
-    CaseMasterID INT NOT NULL,
-    ComplainantName VARCHAR(128) NOT NULL,
-    AgeYear INT,
-    OccupationID INT,
-    ReligionID INT,
-    CasteID INT,
-    GenderID INT,
-    FOREIGN KEY (CaseMasterID) REFERENCES CaseMaster(CaseMasterID)
-);
-
-CREATE TABLE IF NOT EXISTS ActSectionAssociation (
-    CaseMasterID INT NOT NULL,
-    ActID VARCHAR(64) NOT NULL,
-    SectionID VARCHAR(64) NOT NULL,
-    ActOrderID INT DEFAULT 1,
-    SectionOrderID INT DEFAULT 1,
-    PRIMARY KEY (CaseMasterID, ActID, SectionID),
-    FOREIGN KEY (CaseMasterID) REFERENCES CaseMaster(CaseMasterID)
-);
-
-CREATE TABLE IF NOT EXISTS Victim (
-    VictimMasterID INT PRIMARY KEY AUTO_INCREMENT,
-    CaseMasterID INT NOT NULL,
-    VictimName VARCHAR(128) NOT NULL,
-    AgeYear INT,
-    GenderID INT,
-    VictimPolice VARCHAR(8) DEFAULT '0', -- 1 if Victim is police, else 0
-    FOREIGN KEY (CaseMasterID) REFERENCES CaseMaster(CaseMasterID)
-);
-
-CREATE TABLE IF NOT EXISTS Accused (
-    AccusedMasterID INT PRIMARY KEY AUTO_INCREMENT,
-    CaseMasterID INT NOT NULL,
-    AccusedName VARCHAR(128) NOT NULL,
-    AgeYear INT,
-    GenderID INT,
-    PersonID VARCHAR(16) DEFAULT 'A1', -- A1, A2, A3...
-    FOREIGN KEY (CaseMasterID) REFERENCES CaseMaster(CaseMasterID)
-);
-
-CREATE TABLE IF NOT EXISTS ArrestSurrender (
-    ArrestSurrenderID INT PRIMARY KEY AUTO_INCREMENT,
-    CaseMasterID INT NOT NULL,
-    ArrestSurrenderTypeID INT NOT NULL,
-    ArrestSurrenderDate DATE NOT NULL,
-    ArrestSurrenderStateId INT NOT NULL,
-    ArrestSurrenderDistrictId INT NOT NULL,
-    PoliceStationID INT NOT NULL,
-    IOID INT NOT NULL, -- Investigating Officer EmployeeID
-    CourtID INT,
-    AccusedMasterID INT NOT NULL,
-    IsAccused BIT DEFAULT 1,
-    IsComplainantAccused BIT DEFAULT 0,
-    FOREIGN KEY (CaseMasterID) REFERENCES CaseMaster(CaseMasterID),
-    FOREIGN KEY (PoliceStationID) REFERENCES Unit(UnitID),
-    FOREIGN KEY (IOID) REFERENCES Employee(EmployeeID),
-    FOREIGN KEY (AccusedMasterID) REFERENCES Accused(AccusedMasterID)
-);
-
-CREATE TABLE IF NOT EXISTS ChargesheetDetails (
-    CSID INT PRIMARY KEY AUTO_INCREMENT,
-    CaseMasterID INT NOT NULL,
-    csdate DATETIME NOT NULL,
-    cstype CHAR(1) NOT NULL, -- A -> Chargesheet, B -> False Case, C -> Undetected
-    PolicePersonID INT NOT NULL,
-    FOREIGN KEY (CaseMasterID) REFERENCES CaseMaster(CaseMasterID),
-    FOREIGN KEY (PolicePersonID) REFERENCES Employee(EmployeeID)
-);
-
--- -----------------------------------------------------------------------------
--- Operational Intelligence & Review Tables
--- -----------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS flags (
-    ROWID BIGINT PRIMARY KEY AUTO_INCREMENT,
-    flag_id VARCHAR(64) UNIQUE NOT NULL,
-    flag_type VARCHAR(32) NOT NULL, -- HOTSPOT, EMERGING_TREND, ANOMALY, MO_LINK
-    severity VARCHAR(16) NOT NULL, -- LOW, MEDIUM, HIGH, CRITICAL
-    title VARCHAR(256) NOT NULL,
-    summary TEXT NOT NULL,
-    confidence_score DECIMAL(5, 4) NOT NULL,
-    target_type VARCHAR(32) NOT NULL, -- LOCATION, SUSPECT, CATEGORY, JURISDICTION
-    target_id VARCHAR(64) NOT NULL,
-    jurisdiction_id VARCHAR(64) NOT NULL,
-    evidence_payload JSON NOT NULL,
-    status VARCHAR(32) DEFAULT 'PENDING', -- PENDING, ACKNOWLEDGED, ESCALATED, DISMISSED
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS review_decisions (
-    ROWID BIGINT PRIMARY KEY AUTO_INCREMENT,
-    decision_id VARCHAR(64) UNIQUE NOT NULL,
-    flag_id VARCHAR(64) NOT NULL,
-    reviewer_id VARCHAR(64) NOT NULL,
-    reviewer_role VARCHAR(32) NOT NULL, -- Constable, SHO, SP, Analyst, DGP
-    decision VARCHAR(32) NOT NULL, -- ACKNOWLEDGE, ESCALATE, DISMISS
-    action_type VARCHAR(64), -- PATROL_DEPLOYMENT, INVESTIGATION_ASSIGNMENT
-    assigned_to VARCHAR(64),
-    reason TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (flag_id) REFERENCES flags(flag_id)
-);
-
-CREATE TABLE IF NOT EXISTS action_outcomes (
-    ROWID BIGINT PRIMARY KEY AUTO_INCREMENT,
-    outcome_id VARCHAR(64) UNIQUE NOT NULL,
-    decision_id VARCHAR(64) NOT NULL,
-    outcome_status VARCHAR(32) NOT NULL,
-    incident_reduction_pct DECIMAL(5, 2) DEFAULT 0.00,
-    notes TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (decision_id) REFERENCES review_decisions(decision_id)
-);
+-- ============================================================================
+-- NOTES
+-- ============================================================================
+-- 1. flags.status duplicates state also derivable from review_decisions.
+--    This is intentional: the alert-review queue does a single indexed
+--    lookup (WHERE status = 'pending') instead of a join + latest-decision
+--    subquery on every page load. review_decisions remains the append-only
+--    source of truth; flags.status is a denormalized "current state" cache
+--    updated by review-decision whenever a new decision is recorded.
+--
+-- 2. narrative_text on incidents is intentionally NOT normalized out into
+--    a separate table — dgp-summary/QuickML needs raw text with minimal
+--    joins to build RAG context quickly.
+--
+-- 3. Only intake-incident writes to incidents/offenders/victims/junctions.
+--    Only flag-detector writes to flags (review-decision only updates
+--    flags.status). Only review-decision writes to review_decisions and
+--    action_outcomes. Keep this single-writer discipline even as the
+--    codebase grows — it's what keeps the Signal chain predictable.
+-- ============================================================================
