@@ -1,128 +1,144 @@
+'use strict';
+
 /**
- * Input & Data Integrity Validation for KSP Crime Intel Platform
- * Follows Official Karnataka Police ERD Schema Specifications.
+ * functions/shared/validation.js
+ *
+ * Validation used by intake-incident (and any other write path) before data
+ * touches the Data Store. Keeps intake-incident "dumb" — validate + persist
+ * only, no enrichment logic here (that lives in crosslink-on-insert /
+ * flag-detector).
  */
 
-const ALLOWED_CRIME_MAJOR_HEADS = [
-  'Property Offence',
-  'Cybercrime',
-  'Special & Local Laws',
-  'Crimes Against Women',
-  'Crimes Against Body'
+const INCIDENT_TYPES = [
+  'theft', 'assault', 'burglary', 'robbery', 'kidnapping',
+  'homicide', 'fraud', 'vandalism', 'domestic_violence', 'other',
 ];
 
-const VALID_MO_TAGS = [
-  'chain snatching',
-  'OTP fraud',
-  'SIM swap',
-  'burglary - forced entry',
-  'burglary - lock picking',
-  'night time theft',
-  'two wheeler theft',
-  'bank impersonation',
-  'cyber phishing',
-  'drug trafficking',
-  'armed robbery',
-  'extortion call',
-  'domestic violence'
-];
+const FLAG_TYPES = ['hotspot', 'mo_match', 'anomaly', 'risk_score'];
+const FLAG_STATUSES = ['pending', 'acknowledged', 'escalated', 'dismissed'];
+const REVIEW_DECISIONS = ['acknowledge', 'escalate', 'dismiss'];
 
-function validateIncidentPayload(payload) {
+class ValidationError extends Error {
+  constructor(message, fieldErrors = []) {
+    super(message);
+    this.name = 'ValidationError';
+    this.fieldErrors = fieldErrors; // [{ field, message }]
+  }
+}
+
+function isNonEmptyString(v) {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
+function isValidLatLng(lat, lng) {
+  return (
+    typeof lat === 'number' && lat >= -90 && lat <= 90 &&
+    typeof lng === 'number' && lng >= -180 && lng <= 180
+  );
+}
+
+function isValidDate(value) {
+  if (!value) return false;
+  const d = new Date(value);
+  return !Number.isNaN(d.getTime());
+}
+
+/**
+ * Validates the full incident intake payload:
+ * {
+ *   fir_number, incident_type, reported_at, occurred_at, narrative_text, created_by,
+ *   location: { latitude, longitude, district_id, address_text },
+ *   offenders: [{ offender_id? , name?, aliases?, role_in_incident }],
+ *   victims: [{ victim_id?, name?, contact_info? }]
+ * }
+ *
+ * Throws ValidationError with all collected field errors if invalid.
+ */
+function validateIncidentIntake(payload) {
   const errors = [];
 
-  const firNo = payload.CrimeNo || payload.fir_number;
-  if (!firNo || typeof firNo !== 'string' || !firNo.trim()) {
-    errors.push('CrimeNo / fir_number is required and must be a valid non-empty string');
+  if (!payload || typeof payload !== 'object') {
+    throw new ValidationError('Payload must be an object', [
+      { field: 'root', message: 'missing or non-object payload' },
+    ]);
   }
 
-  const stationId = payload.PoliceStationID || payload.station_id;
-  if (!stationId) {
-    errors.push('PoliceStationID / station_id is required');
+  if (!isNonEmptyString(payload.fir_number)) {
+    errors.push({ field: 'fir_number', message: 'required, non-empty string' });
   }
 
-  const lat = parseFloat(payload.latitude);
-  const lng = parseFloat(payload.longitude);
+  if (!INCIDENT_TYPES.includes(payload.incident_type)) {
+    errors.push({
+      field: 'incident_type',
+      message: `must be one of: ${INCIDENT_TYPES.join(', ')}`,
+    });
+  }
 
-  if (isNaN(lat) || isNaN(lng)) {
-    errors.push('Valid latitude and longitude numerical GPS coordinates are required');
+  if (!isValidDate(payload.reported_at)) {
+    errors.push({ field: 'reported_at', message: 'required, valid ISO date' });
+  }
+
+  if (!isValidDate(payload.occurred_at)) {
+    errors.push({ field: 'occurred_at', message: 'required, valid ISO date' });
+  }
+
+  if (!isNonEmptyString(payload.created_by)) {
+    errors.push({ field: 'created_by', message: 'required — user id from auth session' });
+  }
+
+  // location
+  const loc = payload.location;
+  if (!loc || typeof loc !== 'object') {
+    errors.push({ field: 'location', message: 'required object' });
   } else {
-    if (lat < 11.0 || lat > 19.0 || lng < 74.0 || lng > 79.0) {
-      errors.push('Coordinates must fall within Karnataka state geographic boundaries (Lat: 11.0-19.0, Lng: 74.0-79.0)');
+    if (!isValidLatLng(loc.latitude, loc.longitude)) {
+      errors.push({ field: 'location.latitude/longitude', message: 'must be valid coordinates' });
+    }
+    if (loc.district_id == null || Number.isNaN(Number(loc.district_id))) {
+      errors.push({ field: 'location.district_id', message: 'required integer FK' });
     }
   }
 
-  const incDate = payload.IncidentFromDate || payload.occurrence_time;
-  if (!incDate || isNaN(Date.parse(incDate))) {
-    errors.push('IncidentFromDate / occurrence_time must be a valid ISO timestamp');
+  // offenders / victims are optional arrays but must be well-formed if present
+  if (payload.offenders && !Array.isArray(payload.offenders)) {
+    errors.push({ field: 'offenders', message: 'must be an array if provided' });
+  }
+  if (payload.victims && !Array.isArray(payload.victims)) {
+    errors.push({ field: 'victims', message: 'must be an array if provided' });
   }
 
-  const moTags = payload.mo_tags;
-  if (!moTags || !Array.isArray(moTags) || moTags.length === 0) {
-    errors.push('At least one standardized Modus Operandi (mo_tags) tag is required');
+  if (errors.length > 0) {
+    throw new ValidationError('Incident intake validation failed', errors);
   }
 
-  return {
-    isValid: errors.length === 0,
-    errors
-  };
+  return true;
 }
 
-function checkDuplicateIncident(existingIncidents, newPayload) {
-  const newFir = newPayload.CrimeNo || newPayload.fir_number;
-  const newStation = newPayload.PoliceStationID || newPayload.station_id;
-  const newCategory = newPayload.CrimeMinorHeadName || newPayload.case_type || 'General';
-  const newTime = new Date(newPayload.IncidentFromDate || newPayload.occurrence_time).getTime();
-  const newLat = parseFloat(newPayload.latitude);
-  const newLng = parseFloat(newPayload.longitude);
-
-  for (const inc of existingIncidents) {
-    const incFir = inc.CrimeNo || inc.fir_number;
-    if (incFir === newFir) {
-      return { isDuplicate: true, reason: `CrimeNo / FIR number ${newFir} already exists` };
-    }
-
-    const incStation = inc.PoliceStationID || inc.station_id;
-    const incCategory = inc.CrimeMinorHeadName || inc.case_type || 'General';
-    const incTime = new Date(inc.IncidentFromDate || inc.occurrence_time).getTime();
-    const timeDiffHours = Math.abs(newTime - incTime) / (1000 * 60 * 60);
-
-    if (String(incStation) === String(newStation) && incCategory === newCategory && timeDiffHours <= 2) {
-      const incLat = parseFloat(inc.latitude);
-      const incLng = parseFloat(inc.longitude);
-      const distKm = haversineDistance(newLat, newLng, incLat, incLng);
-
-      if (distKm <= 0.2) { // within 200 meters
-        return {
-          isDuplicate: true,
-          reason: `Potential duplicate incident FIR found in same station (${newStation}) within ${Math.round(distKm * 1000)}m and ${timeDiffHours.toFixed(1)}h (Ref: ${incFir})`
-        };
-      }
-    }
+function validateFlagType(flagType) {
+  if (!FLAG_TYPES.includes(flagType)) {
+    throw new ValidationError(`Invalid flag_type: ${flagType}`, [
+      { field: 'flag_type', message: `must be one of: ${FLAG_TYPES.join(', ')}` },
+    ]);
   }
-
-  return { isDuplicate: false };
+  return true;
 }
 
-function haversineDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371; // Earth radius in km
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-function toRad(deg) {
-  return deg * (Math.PI / 180);
+function validateReviewDecision(decision) {
+  if (!REVIEW_DECISIONS.includes(decision)) {
+    throw new ValidationError(`Invalid decision: ${decision}`, [
+      { field: 'decision', message: `must be one of: ${REVIEW_DECISIONS.join(', ')}` },
+    ]);
+  }
+  return true;
 }
 
 module.exports = {
-  validateIncidentPayload,
-  checkDuplicateIncident,
-  ALLOWED_CRIME_MAJOR_HEADS,
-  VALID_MO_TAGS,
-  haversineDistance
+  ValidationError,
+  INCIDENT_TYPES,
+  FLAG_TYPES,
+  FLAG_STATUSES,
+  REVIEW_DECISIONS,
+  validateIncidentIntake,
+  validateFlagType,
+  validateReviewDecision,
 };
