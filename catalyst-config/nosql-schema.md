@@ -1,67 +1,120 @@
-# Catalyst NoSQL Schema — Relationship Graph Store
+# NoSQL Schema — Graph Edges (Catalyst NoSQL)
 
-The Catalyst NoSQL database stores graph-style relationship edges to support multi-hop network queries (`network-analysis`) and Modus Operandi (MO) similarity traversals without heavy SQL joins.
+## Purpose
 
-## Collections & Edge Structures
+Models suspect–victim–location relationships as a graph so `network-analysis`
+(frontend) and `mo_similarity_matcher.py` can do cheap multi-hop traversal
+("who else is connected to this person/place, 2–3 hops out") without
+recursive SQL joins across the Data Store.
 
-### 1. `suspect_suspect_edges`
-Connects suspects/offenders who co-occurred in FIRs or share network links.
+Catalyst NoSQL is a document store, not a native graph DB — there is no
+traversal engine built in. The graph is modeled manually as two collections,
+and all traversal logic lives in application code (Node functions / Python).
+
+**Write ownership:** `event-functions/crosslink-on-insert` is the only writer.
+Everything else reads.
+
+---
+
+## Collections
+
+### `nodes`
+
+One document per person or location that appears in any incident.
+
 ```json
 {
-  "edge_id": "sse_8f9a2b1c",
-  "source_offender_id": "OFF_0012",
-  "target_offender_id": "OFF_0045",
-  "relation_type": "CO_ACCUSED",
-  "shared_incidents": ["FIR_2026_0012", "FIR_2026_0089"],
-  "weight": 2.0,
-  "last_seen": "2026-07-15T14:30:00Z"
+  "node_id":      "string, format: '{node_type}_{ref_id}'  e.g. 'offender_104'",
+  "node_type":    "'offender' | 'victim' | 'location'",
+  "ref_id":       "integer — FK back to Data Store (offenders.offender_id / victims.victim_id / locations.location_id)",
+  "display_name": "string — denormalized for fast rendering without a Data Store round-trip",
+  "created_at":   "ISO 8601 datetime",
+  "updated_at":   "ISO 8601 datetime"
 }
 ```
 
-### 2. `suspect_location_edges`
-Tracks suspect presence across stations, hot spots, and incident coordinates.
+`node_id` is deterministic (`offender_104`, `location_37`) so the writer can
+upsert idempotently — re-processing the same incident doesn't create
+duplicate nodes.
+
+### `edges`
+
+One document per relationship instance, scoped to the incident that created it.
+
 ```json
 {
-  "edge_id": "sle_3d4e5f6a",
-  "offender_id": "OFF_0012",
-  "location_id": "LOC_560001",
-  "district_id": "BENGALURU_CITY",
-  "incident_count": 3,
-  "crime_types": ["THEFT_CHAIN_SNATCHING", "BURGLARY"],
-  "weight": 3.0,
-  "updated_at": "2026-07-20T11:15:00Z"
+  "edge_id":       "string, format: 'edge_{incident_id}_{from_node_id}_{to_node_id}'",
+  "from_node_id":  "string — FK to nodes.node_id",
+  "to_node_id":    "string — FK to nodes.node_id",
+  "relation_type": "'co-offender' | 'victim-of' | 'present-at' | 'co-location'",
+  "incident_id":   "integer — FK back to Data Store incidents.incident_id",
+  "weight":        "number — default 1; incremented if the same relationship recurs across incidents",
+  "created_at":    "ISO 8601 datetime"
 }
 ```
 
-### 3. `suspect_victim_edges`
-Tracks direct connections between suspects and victims across cases.
-```json
-{
-  "edge_id": "sve_1a2b3c4d",
-  "offender_id": "OFF_0012",
-  "victim_id": "VIC_9901",
-  "relation_type": "TARGETED",
-  "associated_fir": "FIR_2026_0012",
-  "created_at": "2026-07-10T09:00:00Z"
-}
+---
+
+## Edge direction convention (fixed — do not deviate)
+
+To keep traversal code predictable, edges are always written in one direction:
+
+| relation_type   | from_node_id     | to_node_id       | meaning |
+|---|---|---|---|
+| `co-offender`    | offender          | offender          | two offenders linked via a shared incident |
+| `victim-of`       | offender           | victim             | offender is accused/suspect against this victim |
+| `present-at`        | offender or victim  | location             | person was present at this location for this incident |
+| `co-location`         | location             | location              | (rare) two locations linked via a common offender pattern — used by MO matcher only |
+
+`crosslink-on-insert` always writes in this direction. Readers (frontend,
+matcher) must query both `from_node_id` and `to_node_id` fields if they need
+an undirected traversal (e.g. "everyone connected to X" regardless of who
+was `from`).
+
+---
+
+## Expected query patterns (design target — write your indexes/keys for these)
+
+1. **2-hop network expansion** (`network-analysis` feature):
+   `edges WHERE from_node_id = X` → collect `to_node_id`s → repeat one more
+   level. Implemented as 2–3 sequential key-based lookups, not a join.
+
+2. **"Who else touched this location recently"** (`mo_similarity_matcher.py`):
+   `edges WHERE to_node_id = {location_node_id} AND relation_type = 'present-at'`,
+   filtered further by `incident_id`'s recency (cross-reference against
+   Data Store `incidents.occurred_at` for the matched `incident_id`s).
+
+3. **Co-offender clusters** (`mo_similarity_matcher.py` / `hotspot_clustering.py`
+   context building): `edges WHERE relation_type = 'co-offender'` for a given
+   offender node, to check if a new incident's offender already has a known
+   network.
+
+4. **Render full subgraph for one incident** (`network-analysis` drill-down):
+   `edges WHERE incident_id = N` → resolve all referenced `nodes`.
+
+---
+
+## Write flow (from `crosslink-on-insert`)
+
+```
+1. New row lands in Data Store `incidents` (Signal fires)
+2. Read incident_offenders, incident_victims, location_id for this incident_id
+3. For each offender/victim/location involved:
+     upsert into `nodes` (idempotent on node_id)
+4. Write edges:
+     - co-offender edges between every pair of offenders on this incident
+     - victim-of edges from each offender to each victim on this incident
+     - present-at edges from each offender/victim to the incident's location
+5. Invoke mo_similarity_matcher.py with the new node/edge context
+     -> may write additional co-location edges or trigger a flag
 ```
 
-### 4. `mo_cluster_edges`
-Links incidents and offenders sharing highly similar Modus Operandi signatures based on TF-IDF cosine similarity calculations.
-```json
-{
-  "edge_id": "moe_77ab88cd",
-  "source_fir": "FIR_2026_0102",
-  "target_fir": "FIR_2026_0155",
-  "shared_mo_tags": ["OTP_FRAUD", "SIM_SWAP", "BANK_IMPERSONATION"],
-  "similarity_score": 0.892,
-  "auto_linked": true,
-  "verified_by_investigator": false,
-  "created_at": "2026-07-22T18:00:00Z"
-}
-```
+---
 
-## Performance & Query Specifications
-- Indexed fields: `offender_id`, `location_id`, `source_fir`, `target_fir`.
-- 2-hop traversal query time threshold: `< 50ms`.
-- Graph visualizer payload format: Compatible with Cytoscape.js and `react-force-graph` nodes/edges JSON array format.
+## Schema discipline
+
+- Keep this file in sync by hand whenever `crosslink-on-insert` changes what
+  it writes — there is no schema enforcement in NoSQL, so drift here means
+  silent bugs in `network-analysis` rendering or the MO matcher.
+- Mirror `node_type` and `relation_type` enums in `client/src/types/` exactly
+  as listed above; do not introduce new values without updating this table.
