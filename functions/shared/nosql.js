@@ -1,116 +1,176 @@
+'use strict';
+
 /**
- * Catalyst NoSQL Graph Edge Helper for KSP Crime Intel Platform
+ * functions/shared/nosqlClient.js
+ *
+ * Wrapper around Catalyst NoSQL, modeling the graph described in
+ * catalyst-config/nosql-schema.md (two collections: nodes, edges).
+ *
+ * This is the ONLY place that should know the raw NoSQL collection names —
+ * crosslink-on-insert, mo_similarity_matcher's Node caller, and role-view
+ * all go through these functions instead of touching collections directly.
  */
 
-const memoryNoSQL = {
-  suspect_suspect_edges: [],
-  suspect_location_edges: [],
-  suspect_victim_edges: [],
-  mo_cluster_edges: []
-};
+const catalyst = require('zcatalyst-sdk-node');
 
-class NoSQLClient {
-  constructor(catalystApp = null) {
-    this.catalystApp = catalystApp;
-  }
+const NODES_TABLE = 'nodes';
+const EDGES_TABLE = 'edges';
 
-  async addEdge(collection, edgeData) {
-    const edge = {
-      edge_id: edgeData.edge_id || `edge_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-      created_at: new Date().toISOString(),
-      ...edgeData
-    };
+function getNoSQL(context) {
+  const app = catalyst.initialize(context);
+  return app.nosql();
+}
 
-    if (!memoryNoSQL[collection]) {
-      memoryNoSQL[collection] = [];
+/** Deterministic node_id so upserts are idempotent. See nosql-schema.md. */
+function buildNodeId(nodeType, refId) {
+  return `${nodeType}_${refId}`;
+}
+
+function buildEdgeId(incidentId, fromNodeId, toNodeId) {
+  return `edge_${incidentId}_${fromNodeId}_${toNodeId}`;
+}
+
+/**
+ * Upsert a node. Idempotent — safe to call repeatedly for the same person/location.
+ */
+async function upsertNode(context, { nodeType, refId, displayName }) {
+  const nosql = getNoSQL(context);
+  const nodeId = buildNodeId(nodeType, refId);
+  const table = nosql.table(NODES_TABLE);
+
+  const now = new Date().toISOString();
+  try {
+    const existing = await table.get(nodeId).catch(() => null);
+    if (existing) {
+      await table.update(nodeId, { display_name: displayName, updated_at: now });
+    } else {
+      await table.insert({
+        node_id: nodeId,
+        node_type: nodeType,
+        ref_id: refId,
+        display_name: displayName,
+        created_at: now,
+        updated_at: now,
+      });
     }
-    memoryNoSQL[collection].push(edge);
-    return edge;
-  }
-
-  async getEdgesByOffender(offenderId) {
-    const suspectEdges = (memoryNoSQL.suspect_suspect_edges || []).filter(
-      e => e.source_offender_id === offenderId || e.target_offender_id === offenderId
-    );
-
-    const locationEdges = (memoryNoSQL.suspect_location_edges || []).filter(
-      e => e.offender_id === offenderId
-    );
-
-    const victimEdges = (memoryNoSQL.suspect_victim_edges || []).filter(
-      e => e.offender_id === offenderId
-    );
-
-    return {
-      offender_id: offenderId,
-      suspect_network: suspectEdges,
-      location_links: locationEdges,
-      victim_links: victimEdges
-    };
-  }
-
-  async getMoClusterEdges(firNumber) {
-    return (memoryNoSQL.mo_cluster_edges || []).filter(
-      e => e.source_fir === firNumber || e.target_fir === firNumber
-    );
-  }
-
-  async getFullGraph() {
-    const nodes = new Map();
-    const edges = [];
-
-    // Collect suspect-suspect edges
-    (memoryNoSQL.suspect_suspect_edges || []).forEach(e => {
-      nodes.set(e.source_offender_id, { id: e.source_offender_id, label: e.source_offender_id, type: 'SUSPECT' });
-      nodes.set(e.target_offender_id, { id: e.target_offender_id, label: e.target_offender_id, type: 'SUSPECT' });
-      edges.push({
-        id: e.edge_id,
-        source: e.source_offender_id,
-        target: e.target_offender_id,
-        relation: e.relation_type,
-        weight: e.weight || 1
-      });
-    });
-
-    // Collect suspect-location edges
-    (memoryNoSQL.suspect_location_edges || []).forEach(e => {
-      nodes.set(e.offender_id, { id: e.offender_id, label: e.offender_id, type: 'SUSPECT' });
-      nodes.set(e.location_id, { id: e.location_id, label: e.location_id, type: 'LOCATION' });
-      edges.push({
-        id: e.edge_id,
-        source: e.offender_id,
-        target: e.location_id,
-        relation: 'LOCATED_AT',
-        weight: e.weight || 1
-      });
-    });
-
-    // Collect MO cluster edges
-    (memoryNoSQL.mo_cluster_edges || []).forEach(e => {
-      nodes.set(e.source_fir, { id: e.source_fir, label: e.source_fir, type: 'INCIDENT' });
-      nodes.set(e.target_fir, { id: e.target_fir, label: e.target_fir, type: 'INCIDENT' });
-      edges.push({
-        id: e.edge_id,
-        source: e.source_fir,
-        target: e.target_fir,
-        relation: 'SIMILAR_MO',
-        weight: e.similarity_score
-      });
-    });
-
-    return {
-      nodes: Array.from(nodes.values()),
-      edges
-    };
-  }
-
-  seedData(initialGraph) {
-    Object.keys(initialGraph).forEach(key => {
-      if (memoryNoSQL[key]) {
-        memoryNoSQL[key] = [...initialGraph[key]];
-      }
-    });
+    return nodeId;
+  } catch (err) {
+    throw new Error(`[nosqlClient.upsertNode] ${nodeId} failed: ${err.message}`);
   }
 }
 
-module.exports = NoSQLClient;
+/**
+ * Write an edge. If the same relationship already exists (rare — same
+ * incident reprocessed), increments weight instead of duplicating.
+ */
+async function writeEdge(context, { fromNodeId, toNodeId, relationType, incidentId, weight = 1 }) {
+  const nosql = getNoSQL(context);
+  const table = nosql.table(EDGES_TABLE);
+  const edgeId = buildEdgeId(incidentId, fromNodeId, toNodeId);
+
+  try {
+    const existing = await table.get(edgeId).catch(() => null);
+    if (existing) {
+      await table.update(edgeId, { weight: (existing.weight || 1) + weight });
+    } else {
+      await table.insert({
+        edge_id: edgeId,
+        from_node_id: fromNodeId,
+        to_node_id: toNodeId,
+        relation_type: relationType,
+        incident_id: incidentId,
+        weight,
+        created_at: new Date().toISOString(),
+      });
+    }
+    return edgeId;
+  } catch (err) {
+    throw new Error(`[nosqlClient.writeEdge] ${edgeId} failed: ${err.message}`);
+  }
+}
+
+/**
+ * One-hop expansion: all edges where the given node is either endpoint.
+ * Used to build 2-3 hop traversal by calling this repeatedly on the frontier.
+ */
+async function getEdgesForNode(context, nodeId, { relationType } = {}) {
+  const nosql = getNoSQL(context);
+  const table = nosql.table(EDGES_TABLE);
+
+  try {
+    const outgoing = await table.query(`from_node_id = '${nodeId}'`);
+    const incoming = await table.query(`to_node_id = '${nodeId}'`);
+    let edges = [...outgoing, ...incoming];
+    if (relationType) {
+      edges = edges.filter((e) => e.relation_type === relationType);
+    }
+    return edges;
+  } catch (err) {
+    throw new Error(`[nosqlClient.getEdgesForNode] ${nodeId} failed: ${err.message}`);
+  }
+}
+
+/**
+ * Multi-hop network expansion, used by network-analysis (via role-view)
+ * and mo_similarity_matcher for proximity checks.
+ *
+ * Returns { nodes: [...], edges: [...] } — a renderable subgraph.
+ */
+async function expandNetwork(context, startNodeId, hops = 2) {
+  const visitedNodeIds = new Set([startNodeId]);
+  const collectedEdges = [];
+  let frontier = [startNodeId];
+
+  for (let hop = 0; hop < hops; hop += 1) {
+    const nextFrontier = [];
+    for (const nodeId of frontier) {
+      const edges = await getEdgesForNode(context, nodeId);
+      for (const edge of edges) {
+        collectedEdges.push(edge);
+        const neighbor = edge.from_node_id === nodeId ? edge.to_node_id : edge.from_node_id;
+        if (!visitedNodeIds.has(neighbor)) {
+          visitedNodeIds.add(neighbor);
+          nextFrontier.push(neighbor);
+        }
+      }
+    }
+    frontier = nextFrontier;
+    if (frontier.length === 0) break;
+  }
+
+  const nosql = getNoSQL(context);
+  const nodesTable = nosql.table(NODES_TABLE);
+  const nodes = await Promise.all(
+    [...visitedNodeIds].map((id) => nodesTable.get(id).catch(() => null))
+  );
+
+  return {
+    nodes: nodes.filter(Boolean),
+    edges: collectedEdges,
+  };
+}
+
+/**
+ * All edges tied to a single incident — used to render a per-incident
+ * subgraph (network-analysis drill-down) or to rebuild context for the
+ * MO matcher.
+ */
+async function getEdgesForIncident(context, incidentId) {
+  const nosql = getNoSQL(context);
+  const table = nosql.table(EDGES_TABLE);
+  try {
+    return await table.query(`incident_id = ${incidentId}`);
+  } catch (err) {
+    throw new Error(`[nosqlClient.getEdgesForIncident] incident ${incidentId} failed: ${err.message}`);
+  }
+}
+
+module.exports = {
+  buildNodeId,
+  buildEdgeId,
+  upsertNode,
+  writeEdge,
+  getEdgesForNode,
+  expandNetwork,
+  getEdgesForIncident,
+};
