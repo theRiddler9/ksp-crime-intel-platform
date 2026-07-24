@@ -1,10 +1,6 @@
 # Karnataka State Crime Records Bureau (SCRB) Crime Intel Platform
 
-> **Proactive Crime Intelligence & Predictive Policing Platform built on Zoho Catalyst Serverless Architecture**
-
----
-
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 ksp-crime-intel-platform/
@@ -76,14 +72,13 @@ ksp-crime-intel-platform/
 
 ---
 
-## 🚀 Getting Started & Execution Instructions
+## Getting Started & Execution Instructions
 
 ### Prerequisites
+
 - **Node.js**: `v18.x` or higher
 - **Python**: `3.9+`
 - **Zoho Catalyst CLI**: `npm install -g zcatalyst-cli`
-
----
 
 ### Step 1: Clone & Install Dependencies
 
@@ -96,8 +91,6 @@ cd ksp-crime-intel-platform
 npm install
 ```
 
----
-
 ### Step 2: Generate Synthetic Karnataka Crime Data
 
 Generate ~150 synthetic FIRs across Bengaluru City, Mysuru, Hubballi-Dharwad, and Mangaluru:
@@ -107,8 +100,6 @@ python intelligence/data_generation/generate_synthetic_crimes.py
 ```
 
 This creates `synthetic_ksp_crimes.json` used by intelligence models for testing.
-
----
 
 ### Step 3: Test ML Intelligence Models Locally
 
@@ -122,8 +113,6 @@ python intelligence/models/hotspot_clustering.py < synthetic_ksp_crimes.json
 python intelligence/models/trend_anomaly_detector.py < synthetic_ksp_crimes.json
 ```
 
----
-
 ### Step 4: Run Catalyst Local Development Server
 
 Start the Catalyst serverless functions locally:
@@ -134,15 +123,13 @@ catalyst serve
 
 Local API Gateway endpoints will be available at `http://localhost:3000/server/`:
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/server/intake-incident/` | POST | Submit new FIR entry |
-| `/server/role-view/?role=SHO&station_id=STATION_HAL` | GET | Role-gated dashboard payload |
-| `/server/flags/` | GET / POST | List pending intelligence flags |
-| `/server/review-decision/` | POST | Record officer review decision |
-| `/server/dgp-summary/` | GET | QuickML plain-language summary |
-
----
+| Endpoint                                             | Method     | Description                     |
+| ---------------------------------------------------- | ---------- | ------------------------------- |
+| `/server/intake-incident/`                           | POST       | Submit new FIR entry            |
+| `/server/role-view/?role=SHO&station_id=STATION_HAL` | GET        | Role-gated dashboard payload    |
+| `/server/flags/`                                     | GET / POST | List pending intelligence flags |
+| `/server/review-decision/`                           | POST       | Record officer review decision  |
+| `/server/dgp-summary/`                               | GET        | QuickML plain-language summary  |
 
 ### Step 5: Deploy to Zoho Catalyst Cloud
 
@@ -154,22 +141,19 @@ catalyst login
 catalyst deploy
 ```
 
----
+## Operational Stage Mapping
 
-## 🏛️ Operational Stage Mapping
+| Stage                            | Platform Component                                | System Action                                                        |
+| -------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------- |
+| **Stage 1: Station Entry**       | `intake-incident` Function                        | Validates mandatory fields, checks duplicates, writes to Data Store. |
+| **Stage 2: Upward Transmission** | `crosslink-on-insert` Signal                      | Auto-transmits data to District & SCRB without re-entry.             |
+| **Stage 3: Linking**             | `nosql.js` + `mo_similarity_matcher.py`           | Populates NoSQL graph edges and surfaces MO similarity links.        |
+| **Stage 4: Pattern Surfacing**   | `flag-detector` + `hotspot_clustering.py`         | Surfaces spatial hotspots & emerging 30-day trend spikes.            |
+| **Stage 5: Role-Based Views**    | `role-view` Function                              | Server-side shapes payloads for Constable, SHO, SP, Analyst, DGP.    |
+| **Stage 6: Human Review**        | `review-decision` + `review-escalation-flow.json` | Requires officer sign-off (`ACKNOWLEDGE`, `ESCALATE`, `DISMISS`).    |
+| **Stage 7: Ground Action**       | `review_decisions` & `action_outcomes`            | Dispatches patrol routes and logs preventive deployment.             |
+| **Stage 8: Feedback Loop**       | `cron-jobs/nightly-batch-scoring`                 | Logs rejection reasons into feedback dataset and updates Cache.      |
 
-| Stage | Platform Component | System Action |
-|---|---|---|
-| **Stage 1: Station Entry** | `intake-incident` Function | Validates mandatory fields, checks duplicates, writes to Data Store. |
-| **Stage 2: Upward Transmission** | `crosslink-on-insert` Signal | Auto-transmits data to District & SCRB without re-entry. |
-| **Stage 3: Linking** | `nosql.js` + `mo_similarity_matcher.py` | Populates NoSQL graph edges and surfaces MO similarity links. |
-| **Stage 4: Pattern Surfacing** | `flag-detector` + `hotspot_clustering.py` | Surfaces spatial hotspots & emerging 30-day trend spikes. |
-| **Stage 5: Role-Based Views** | `role-view` Function | Server-side shapes payloads for Constable, SHO, SP, Analyst, DGP. |
-| **Stage 6: Human Review** | `review-decision` + `review-escalation-flow.json` | Requires officer sign-off (`ACKNOWLEDGE`, `ESCALATE`, `DISMISS`). |
-| **Stage 7: Ground Action** | `review_decisions` & `action_outcomes` | Dispatches patrol routes and logs preventive deployment. |
-| **Stage 8: Feedback Loop** | `cron-jobs/nightly-batch-scoring` | Logs rejection reasons into feedback dataset and updates Cache. |
+## License & Compliance
 
----
-
-## 🛡️ License & Compliance
 Confidential & Proprietary — Developed for Karnataka State Police (KSP) & State Crime Records Bureau (SCRB). Protected under Govt of Karnataka security guidelines.
