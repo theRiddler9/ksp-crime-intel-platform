@@ -41,9 +41,11 @@ export function LoginPage() {
       <div className="relative w-full max-w-lg animate-scale-in">
         {/* Logo Header */}
         <div className="text-center mb-8">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-cyan-500/20">
-            <Shield size={28} className="text-white" />
-          </div>
+          <img 
+            src="/logo.svg" 
+            alt="KSP Logo" 
+            className="w-20 h-20 object-contain mx-auto mb-5 drop-shadow-lg"
+          />
           <h1 className="text-2xl font-bold tracking-tight gradient-text">
             KSP Crime Intel Platform
           </h1>

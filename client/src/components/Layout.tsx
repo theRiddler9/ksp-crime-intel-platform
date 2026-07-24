@@ -57,9 +57,11 @@ export function Layout({ user, children }: LayoutProps) {
       >
         {/* Logo / Header */}
         <div className="flex items-center gap-3 px-5 h-[72px] border-b border-[var(--border-subtle)] shrink-0">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shrink-0">
-            <Shield size={20} className="text-white" />
-          </div>
+          <img 
+            src="/logo.svg" 
+            alt="KSP Logo" 
+            className="w-10 h-10 object-contain shrink-0 drop-shadow-sm"
+          />
           {sidebarOpen && (
             <div className="animate-fade-in overflow-hidden">
               <div className="text-[15px] font-bold tracking-tight whitespace-nowrap">KSP Crime Intel</div>
