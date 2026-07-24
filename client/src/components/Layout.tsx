@@ -4,7 +4,7 @@ import clsx from 'clsx';
 import {
   Map, Network, TrendingUp, Bell, FileText,
   Shield, LogOut, Menu, X, ChevronRight,
-  LayoutDashboard, PlusCircle,
+  LayoutDashboard, PlusCircle, Sun, Moon,
 } from 'lucide-react';
 import type { User } from '../types/role';
 import { ROLE_FEATURES, ROLE_LABELS } from '../types/role';
@@ -28,6 +28,7 @@ const navItems = [
 
 export function Layout({ user, children }: LayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isLightMode, setIsLightMode] = useState(false);
   const navigate = useNavigate();
   const features = ROLE_FEATURES[user.role];
 
@@ -38,6 +39,11 @@ export function Layout({ user, children }: LayoutProps) {
   const handleLogout = () => {
     logout();
     navigate('/login');
+  };
+
+  const toggleTheme = () => {
+    setIsLightMode(!isLightMode);
+    document.documentElement.classList.toggle('light-mode');
   };
 
   return (
@@ -149,6 +155,14 @@ export function Layout({ user, children }: LayoutProps) {
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+              onClick={toggleTheme}
+              className="p-2 rounded-lg hover:bg-white/5 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+              title="Toggle Theme"
+            >
+              {isLightMode ? <Moon size={18} /> : <Sun size={18} />}
+            </button>
+            <div className="w-px h-5 bg-[var(--border-subtle)]" />
             <div className="text-xs text-[var(--text-muted)] mono">
               {new Date().toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' })}
             </div>
