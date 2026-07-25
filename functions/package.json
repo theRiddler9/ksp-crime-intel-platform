@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Catalyst Serverless Functions — data layer + intake for KSP Crime Intel Platform",
   "main": "index.js",
+  "scripts": {
+    "postinstall": "python -m pip install -r intelligence-service/requirements.txt"
+  },
   "dependencies": {
     "zcatalyst-sdk-node": "^2.0.0"
   },
