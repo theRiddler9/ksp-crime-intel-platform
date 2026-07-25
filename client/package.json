@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node -e \"require('fs').copyFileSync('client-package.json', 'dist/client-package.json')\"",
     "lint": "oxlint",
     "preview": "vite preview"
   },

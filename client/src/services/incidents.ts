@@ -4,7 +4,7 @@
 // ──────────────────────────────────────────────
 
 import type { Incident, IncidentSummary } from '../types/incident';
-import { simulateDelay } from './api';
+import { simulateDelay, apiRequest } from './api';
 import { mockIncidents, mockIncidentSummaries } from './mockData';
 
 export async function getIncidents(): Promise<IncidentSummary[]> {
@@ -37,9 +37,16 @@ export async function getRecentIncidents(days: number = 7): Promise<IncidentSumm
 }
 
 export async function submitIncident(
-  _data: Partial<Incident>,
+  data: Partial<Incident>,
 ): Promise<{ success: boolean; id: string }> {
-  // TODO: POST to intake-incident Function
-  await simulateDelay(500);
-  return { success: true, id: `INC-${Date.now()}` };
+  // Call the actual Catalyst function: intake-incident
+  const response = await apiRequest<{ success: boolean; incident_id: string; fir_number: string }>(
+    '/intake-incident/execute', 
+    {
+      method: 'POST',
+      body: data
+    }
+  );
+  
+  return { success: response.success, id: response.incident_id };
 }

@@ -42,7 +42,7 @@ export function LoginPage() {
         {/* Logo Header */}
         <div className="text-center mb-8">
           <img 
-            src="/logo.svg" 
+            src={`${import.meta.env.BASE_URL}logo.svg`} 
             alt="KSP Logo" 
             className="w-20 h-20 object-contain mx-auto mb-5 drop-shadow-lg"
           />

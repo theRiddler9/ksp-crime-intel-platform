@@ -3,7 +3,7 @@
 // TODO: Replace with Catalyst Web SDK when connecting to live backend
 // ──────────────────────────────────────────────
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/server';
 
 export class ApiError extends Error {
   status: number;

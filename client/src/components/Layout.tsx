@@ -58,7 +58,7 @@ export function Layout({ user, children }: LayoutProps) {
         {/* Logo / Header */}
         <div className="flex items-center gap-3 px-5 h-[72px] border-b border-[var(--border-subtle)] shrink-0">
           <img 
-            src="/logo.svg" 
+            src={`${import.meta.env.BASE_URL}logo.svg`} 
             alt="KSP Logo" 
             className="w-10 h-10 object-contain shrink-0 drop-shadow-sm"
           />
