@@ -7,15 +7,21 @@ const path = require('path');
 
 async function runPythonScript(scriptPath, inputData, timeoutMs = 10000) {
   return new Promise((resolve) => {
-    const fullPath = path.resolve(__dirname, '../../intelligence', scriptPath);
+    // Determine the root of the project by checking if we are inside .build
+    const isBuild = __dirname.includes('.build');
+    const rootDir = isBuild ? path.resolve(__dirname, '../../../') : path.resolve(__dirname, '../../');
+    const fullPath = path.resolve(rootDir, 'intelligence', scriptPath);
     let outputData = '';
     let errorData = '';
+
+    console.log(`[pythonBridge] Spawning python for ${fullPath}`);
 
     const pyProcess = spawn('python', [fullPath], {
       windowsHide: true
     });
 
     const timer = setTimeout(() => {
+      console.log(`[pythonBridge] Python process timed out!`);
       pyProcess.kill();
       resolve({
         success: false,
@@ -30,15 +36,18 @@ async function runPythonScript(scriptPath, inputData, timeoutMs = 10000) {
 
     pyProcess.stderr.on('data', (data) => {
       errorData += data.toString();
+      console.error(`[pythonBridge] stderr: ${data.toString()}`);
     });
 
     pyProcess.on('close', (code) => {
+      console.log(`[pythonBridge] Python process closed with code ${code}`);
       clearTimeout(timer);
       if (code === 0 && outputData.trim()) {
         try {
           const parsed = JSON.parse(outputData);
           resolve({ success: true, result: parsed });
         } catch (e) {
+          console.error(`[pythonBridge] JSON parse failed: ${e.message}`);
           resolve({
             success: false,
             error: `Failed to parse Python output: ${e.message}`,
@@ -47,6 +56,7 @@ async function runPythonScript(scriptPath, inputData, timeoutMs = 10000) {
           });
         }
       } else {
+        console.error(`[pythonBridge] exit without valid output`);
         resolve({
           success: false,
           error: errorData || `Python script exited with code ${code}`,
@@ -55,8 +65,24 @@ async function runPythonScript(scriptPath, inputData, timeoutMs = 10000) {
       }
     });
 
-    pyProcess.stdin.write(JSON.stringify(inputData));
-    pyProcess.stdin.end();
+    pyProcess.on('error', (err) => {
+       console.error(`[pythonBridge] spawn error: ${err.message}`);
+       clearTimeout(timer);
+       resolve({ success: false, error: err.message, fallbackUsed: true });
+    });
+
+    if (inputData) {
+       try {
+         console.log(`[pythonBridge] Writing inputData to stdin...`);
+         pyProcess.stdin.write(JSON.stringify(inputData));
+         pyProcess.stdin.end();
+         console.log(`[pythonBridge] Wrote stdin.`);
+       } catch (err) {
+         console.error(`[pythonBridge] Error writing to stdin: ${err.stack}`);
+         clearTimeout(timer);
+         resolve({ success: false, error: err.message, fallbackUsed: true });
+       }
+    }
   });
 }
 

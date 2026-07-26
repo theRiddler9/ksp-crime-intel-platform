@@ -8,31 +8,34 @@ const DataStoreClient = require('../shared/db');
 const NoSQLClient = require('../shared/nosql');
 const CacheClient = require('../shared/cache');
 const { success, error } = require('../shared/response');
-const { fallbackHotspotClustering } = require('../shared/pythonBridge');
+const { fallbackHotspotClustering, runPythonScript } = require('../shared/pythonBridge');
 
 const db = new DataStoreClient();
-const nosql = new NoSQLClient();
-const cache = new CacheClient();
 
 async function handler(req, res) {
   try {
     const query = req.query || req.params || {};
-    const role = (query.role || req.headers['x-user-role'] || 'Constable').toUpperCase();
+    const role = (query.role || (req.headers && req.headers['x-user-role']) || 'Constable').toUpperCase();
     const jurisdiction = query.jurisdiction || query.district || 'BENGALURU_CITY';
     const stationId = query.station_id || 'STATION_HAL';
 
-    // 1. Try fetching precomputed role payload from Catalyst Cache
-    const cacheKey = `role_payload_${role}_${jurisdiction}_${stationId}`;
-    const cachedPayload = await cache.get(cacheKey);
-    if (cachedPayload && !query.nocache) {
-      return success(res, cachedPayload, 200, `Fetched cached payload for role: ${role}`);
-    }
+    // (Skipping Cache in local testing to prevent hangs)
+
 
     // 2. Fetch ground-truth datasets
+    console.log('[RoleView] Fetching datasets from DB...');
     const incidents = await db.find('incidents');
     const flags = await db.find('flags');
     const offenders = await db.find('offenders');
-    const graphData = await nosql.getFullGraph();
+    console.log('[RoleView] Fetch complete. Running python script...');
+    
+    const graphRes = await runPythonScript('scripts/get_network_graph.py', incidents);
+    console.log('[RoleView] Python script returned.');
+    
+    const graphData = graphRes.success ? graphRes.result : { nodes: [], edges: [] };
+    if (!graphRes.success) {
+      console.warn('[RoleView] Failed to generate network graph:', graphRes.error);
+    }
 
     let rolePayload = {};
 
@@ -182,15 +185,18 @@ async function handler(req, res) {
         return error(res, `Unknown role: ${role}`, 400);
     }
 
-    // Save to Cache for 5 minutes (300 seconds)
-    await cache.put(cacheKey, rolePayload, 300);
-
-    return success(res, rolePayload, 200, `Role view built successfully for ${role}`);
+    // (Skipping Cache in local testing to prevent hangs)
+    
+    const result = success(res, rolePayload, 200, `Role view built successfully for ${role}`);
+    if (req.close) req.close();
+    return result;
 
   } catch (err) {
     console.error(`[RoleView] Internal error: ${err.stack}`);
-    return error(res, 'Failed to build role payload', 500, err.message);
+    const errResult = error(res, 'Failed to build role payload', 500, err.message);
+    if (req.close) req.close();
+    return errResult;
   }
 }
 
-module.exports = { handler };
+module.exports = handler;

@@ -1,0 +1,12 @@
+{
+  "name": "shared",
+  "version": "1.0.0",
+  "description": "Shared libraries",
+  "main": "index.js",
+  "dependencies": {
+    "zcatalyst-sdk-node": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
